@@ -1,0 +1,117 @@
+import json
+import os
+import boto3
+import urllib3
+
+# Initialize the S3 client
+s3 = boto3.client('s3')
+slack_webhook_url = os.environ['slack_webhook']
+http = urllib3.PoolManager()
+
+def send_slack_notification(message):
+    """Send a notification to Slack."""
+    payload = {
+        "blocks": message
+    }
+    response = http.request('POST', slack_webhook_url, body=json.dumps(payload), headers={'Content-Type': 'application/json'})
+    return response.status
+
+def list_all_files(bucket_name, prefix=''):
+    """List all files in a specified S3 bucket and prefix."""
+    try:
+        paginator = s3.get_paginator('list_objects_v2')
+        file_names = []
+
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    file_names.append(obj['Key'])  # Append the file (object) key to the list
+
+        return file_names  # Return the list of file names
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return []
+
+def lambda_handler(event, context):
+    bucket_name = 'verified-prod-eu-central1'
+    prefix = ''  # Leave it empty to list all files in the bucket
+
+    # List all files in the bucket
+    files = list_all_files(bucket_name, prefix)
+    
+    files_deleted = []
+    
+    # Check each file for the specified tag and delete if it matches
+    for file_key in files:
+        try:
+            # Get the tags for the object
+            tag_response = s3.get_object_tagging(Bucket=bucket_name, Key=file_key)
+            tags = tag_response['TagSet']
+
+            # Check if the specific tag exists
+            for tag in tags:
+                if tag['Key'] == 'GuardDutyMalwareScanStatus' and tag['Value'] == 'THREATS_FOUND':
+                    print(f"Deleting file: {file_key}")
+                    s3.delete_object(Bucket=bucket_name, Key=file_key)
+                    files_deleted.append(file_key)
+                    break  # No need to check other tags once we've matched
+
+        except Exception as e:
+            print(f"Error processing file {file_key}: {e}")
+
+    # Prepare Slack notification message
+    if files_deleted:
+        file_list = "\n".join(files_deleted)  # Create a list of deleted files
+        message = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*🚨 Virus Alert 🚨*"
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "*S3 Bucket:*\n`{}`".format(bucket_name)
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": "*Files Infected:*\n" + file_list
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": "*Threat Status:*\n`THREATS_FOUND`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": "*Deleted Files:*\n" + file_list
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": "*Action Taken:*\n`Quarantined/Deleted`"
+                    }
+                ]
+            }
+        ]
+    else:
+        message = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*🛡️ No threats found.*"
+                }
+            }
+        ]
+
+    # Send notification to Slack
+    send_slack_notification(message)
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps(f'Processed files in {bucket_name} under prefix "{prefix}" successfully!')
+    }
