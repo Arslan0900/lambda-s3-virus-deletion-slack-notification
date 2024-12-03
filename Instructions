@@ -1,0 +1,1 @@
+To enable virus scanning on the bucket, first, enable the AWS service GuardDuty for the bucket you want to protect against viruses. Then, set up a Lambda function and configure it with the bucket name. Once the setup is complete, you can test it by uploading a test virus file to the bucket. The system will automatically detect and delete the file within seconds.
